@@ -202,3 +202,8 @@ for this board has `SDA`/`SCL` swapped relative to these, as 14/15.)
 
 **Software**
 - [ESP-IDF programming guide (ESP32-S3)](https://docs.espressif.com/projects/esp-idf/en/v6.0.2/esp32s3/index.html) · [ESP-IDF source](https://github.com/espressif/esp-idf)
+
+## License
+
+[Apache License 2.0](LICENSE). `components/amoled-board/font5x7.h` comes from the Adafruit GFX
+library and keeps its own BSD licence, reproduced at the top of that file.
