@@ -25,7 +25,9 @@ static const char *TAG = "display";
 #define OPCODE_WRITE_PIXELS 0x32  // payload on all four lines
 
 // Registers (MIPI DCS plus a few vendor ones, shared by the CO5300 and SH8601)
+#define REG_SLEEP_IN 0x10
 #define REG_SLEEP_OUT 0x11
+#define REG_DISPLAY_OFF 0x28
 #define REG_DISPLAY_ON 0x29
 #define REG_COLUMN_ADDR 0x2A
 #define REG_ROW_ADDR 0x2B
@@ -130,6 +132,19 @@ esp_err_t display_init(int column_offset)
 void display_set_brightness(uint8_t level)
 {
     write_reg8(REG_BRIGHTNESS, level);
+}
+
+void display_set_power(bool on)
+{
+    if (on) {
+        write_reg(REG_SLEEP_OUT, NULL, 0);
+        vTaskDelay(pdMS_TO_TICKS(120));
+        write_reg(REG_DISPLAY_ON, NULL, 0);
+    } else {
+        write_reg8(REG_BRIGHTNESS, 0x00);
+        write_reg(REG_DISPLAY_OFF, NULL, 0);
+        write_reg(REG_SLEEP_IN, NULL, 0);
+    }
 }
 
 void display_flush(void)

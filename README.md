@@ -34,12 +34,15 @@ The line has to satisfy every clue on the board:
 
 | Clue | Looks like | Rule |
 | --- | --- | --- |
-| Beacon | pale dot in a channel or at a crossing | the line must pass through it |
-| Gap | a channel plugged with tile | the line cannot go that way |
-| Count | digit 0–3 on a tile | exactly that many of the tile's four sides are part of the line |
-| Gem | coloured diamond on a tile | the line splits the board into areas; no area may hold two colours |
+| Beacon | hexagon in a channel or at a crossing | the line must pass through it |
+| Gap | a break in the channel | the line cannot go that way |
+| Count | 1–3 orange triangles on a tile | that many of the tile's four sides are part of the line |
+| Square | rounded square on a tile | the line splits the board into areas; no area may hold squares of two colours |
+| Star | 8-pointed star on a tile | its area must hold exactly two symbols (stars or squares) of its colour |
+| Polyomino | gold Tetris shape on a tile | its area must be tiled by the shapes inside it, without rotation |
+| Negator | white 3-pronged Y on a tile | cancels one broken symbol in its area (fails if nothing in its area is broken) |
 
-There are 15 levels, from 2×2 to 5×5, each new rule introduced on a small board. Every
+There are 50 levels, from 2×2 to 5×5 (including 2×3, 3×4, and 4×5 vertical rectangular grids), each new rule introduced gently on a small board before combining with earlier rules. Every
 puzzle is generated afresh each time its level is opened, so it is never the same twice
 (see below). The screen shows only the board. A correct answer turns the line green and moves on to the next
 puzzle; a wrong one flashes red and marks the clues it broke.
@@ -48,10 +51,7 @@ puzzle; a wrong one flashes red and marks the clues it broke.
 | --- | --- |
 | BOOT, short press | next puzzle |
 | PWR, short press | previous puzzle |
-| either, held for 0.6 s | clear the line |
-
-Holding PWR for about six seconds switches the board off; that is the power chip's doing,
-not the game's.
+| either, held for 6 s | power off / on |
 
 Sound comes from the board's speaker. While your finger is drawing, a steady hum plays,
 and it fades out when you lift your finger. Solving, a wrong answer and the buttons each have a short
@@ -75,7 +75,7 @@ make game-monitor    # serial log (Ctrl+] to quit)
 | `main/levels.c` | The levels: size and clue types of each |
 | `main/generator.c`, `generator.h` | Puzzle generator and solver |
 | `main/puzzle_cache.c`, `puzzle_cache.h` | Board only: generates puzzles in the background, falls back on the bank |
-| `main/puzzle_bank.c` | 600 pre-computed puzzles, written by `make game-bank` |
+| `main/puzzle_bank.c` | 2,000 pre-computed puzzles, written by `make game-bank` |
 | `main/synth.c`, `synth.h` | Sound generator: the drawing hum and the short phrases |
 | `main/sound.c`, `sound.h` | Runs the generator in its own task and feeds the speaker |
 | `main/main.c` | Connects the game to the board's touch, display, buttons and speaker |
@@ -104,7 +104,7 @@ make game-bank                                              # regenerate the ban
 build-host/puzzle_tool gen 4 4 ngb 7     # print one puzzle: columns, rows, rules, seed
 ```
 
-The rules argument is any mix of `n` (counts), `g` (gems), `b` (beacons) and `x` (gaps).
+The rules argument is any mix of `n` (triangles), `g` (squares), `s` (stars), `p` (polyominoes), `y` (negators), `b` (hexagons) and `x` (gaps).
 `make game-test` generates 100 puzzles for every level and reports how often they have a
 single solution and how long they take.
 

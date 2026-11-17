@@ -9,7 +9,8 @@
 #include "puzzle.h"
 
 // What kind of puzzle to make: its size, and which clues it may use.
-// rules: any mix of 'n' (counts), 'g' (gems), 'b' (beacons), 'x' (gaps).
+// rules: any mix of 'n' (triangles), 'g' (squares), 's' (stars),
+// 'p' (polyominoes), 'y' (negators), 'b' (hexagons), 'x' (gaps).
 // No rules makes a clue-free board where any path from start to exit works.
 typedef struct {
     uint8_t cols, rows;

@@ -12,6 +12,8 @@
 // Call after board_init(). Sets up the codec and switches the amplifier on.
 esp_err_t audio_init(void);
 
+void audio_set_power(bool on);
+
 // Plays 16-bit mono samples at AUDIO_SAMPLE_RATE. Blocks until they have been
 // handed to the output; silence is played whenever nothing is written.
 void audio_write(const int16_t *samples, size_t count);

@@ -32,6 +32,11 @@ static const char *TAG = "board";
 #define TOUCH_REG_FINGER_COUNT 0x02  // followed by XH, XL, YH, YL
 #define TOUCH_DETECT_TIMEOUT_MS 600
 
+// AXP2101 PMU: disable its 6 s hardware power-key cutoff so firmware can
+// handle 6 s power-off/on symmetrically on both BOOT and PWR buttons.
+#define PMU_ADDR 0x34
+#define PMU_REG_PWROFF_EN 0x22
+
 static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_expander;  // NULL if the expander did not answer
 static i2c_master_dev_handle_t s_touch;
@@ -116,6 +121,17 @@ esp_err_t board_init(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "IO expander reset failed (%s); continuing without a hardware reset",
                  esp_err_to_name(err));
+    }
+
+    if (probe(PMU_ADDR)) {
+        i2c_master_dev_handle_t pmu;
+        if (add_device(PMU_ADDR, &pmu) == ESP_OK) {
+            uint8_t pwroff_en = 0;
+            if (read_regs(pmu, PMU_REG_PWROFF_EN, &pwroff_en, 1) == ESP_OK) {
+                write_reg(pmu, PMU_REG_PWROFF_EN, pwroff_en & ~0x02);
+            }
+            i2c_master_bus_rm_device(pmu);
+        }
     }
 
     s_touch_addr = detect_touch_controller();

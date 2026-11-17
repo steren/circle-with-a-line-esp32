@@ -6,19 +6,23 @@
 #include "gfx.h"
 #include "levels.h"
 #include "puzzle.h"
+#include "synth.h"
 
 // ---- Layout: the board fills the screen, with nothing else on it ----
 #define BOARD_CENTER_X (GAME_SCREEN_WIDTH / 2)
 #define BOARD_CENTER_Y (GAME_SCREEN_HEIGHT / 2)
-#define BOARD_MAX_SIZE 296  // leaves room at the sides for exit caps
-#define BOARD_MARGIN 40  // room around the lattice for start circles and exit caps
+#define BOARD_MAX_WIDTH 296   // leaves room at the sides for start circles and exit caps
+#define BOARD_MAX_HEIGHT 368  // uses the taller vertical screen for portrait boards
+#define BOARD_MARGIN 40       // room around the lattice for start circles and exit caps
 #define MAX_CELL_SIZE 104
 #define TILE_CORNER 5
 
 // ---- Timing ----
 #define RELEASE_POLLS 3  // updates without a touch before the finger counts as lifted
 #define SOLVED_PAUSE_MS 1500
-#define FAILED_PAUSE_MS 1000
+#define SOLVED_FADE_OUT_MS 350
+#define FAILED_PAUSE_MS 1050
+#define FAILED_BLINK_MS 150
 
 // ---- Colours ----
 // Each puzzle glows in one flat, saturated colour, like a sheet of lit acrylic
@@ -32,7 +36,7 @@ static const theme_rgb_t THEMES[] = {
     {{18, 118, 122}, {30, 148, 148}, {8, 56, 62}, {228, 255, 248}},     // teal
     {{36, 72, 176}, {54, 98, 206}, {16, 30, 90}, {228, 238, 255}},      // cobalt
     {{104, 50, 164}, {130, 74, 194}, {48, 20, 86}, {244, 230, 255}},    // violet
-    {{200, 112, 24}, {226, 142, 42}, {100, 50, 8}, {255, 247, 224}},    // amber
+    {{136, 68, 22}, {162, 84, 32}, {64, 28, 6}, {255, 247, 224}},       // bronze
     {{58, 138, 62}, {82, 168, 80}, {24, 66, 28}, {238, 255, 228}},      // moss
     {{176, 40, 92}, {204, 62, 116}, {84, 14, 42}, {255, 230, 240}},     // raspberry
 };
@@ -49,7 +53,9 @@ static struct {
 #define COLOR_SOLVED rgb565(150, 255, 170)
 #define COLOR_FAILED rgb565(255, 86, 72)
 #define COLOR_BEACON T.beacon
-#define COLOR_COUNT T.count
+#define COLOR_TRIANGLE RGB565(255, 180, 16)
+#define COLOR_POLY RGB565(255, 212, 36)
+#define COLOR_NEGATOR RGB565(236, 244, 255)
 
 // Soft darkening towards the edges of the screen (255 = full brightness).
 #define VIGNETTE_EDGE 0.52f   // brightness right at an edge; corners get this squared
@@ -85,20 +91,22 @@ static void build_vignette(uint8_t *shade, int length)
 }
 
 static const uint16_t GEM_COLORS[PUZZLE_GEM_COLORS] = {
-    RGB565(255, 92, 180),   // pink
-    RGB565(92, 214, 255),   // sky blue
-    RGB565(214, 240, 70),   // lime
+    RGB565(20, 22, 28),     // black
+    RGB565(244, 248, 255),  // white
+    RGB565(72, 218, 255),   // cyan
 };
 
 typedef enum { STATE_PLAYING, STATE_SOLVED, STATE_FAILED } state_t;
 
 static struct {
-    uint32_t seed;  // random state for generating puzzles
+    uint32_t seed;       // random state for generating puzzles
+    uint32_t puzzle_id;  // increments each time a puzzle is loaded
     int level;
     puzzle_t puzzle;
     puzzle_path_t path;
     puzzle_result_t result;  // valid in STATE_FAILED
     state_t state;
+    bool blink_on;           // toggles in STATE_FAILED to flash broken clues
     uint32_t state_since_ms;
     uint32_t now_ms;
 
@@ -208,13 +216,6 @@ static int travel_limit(int from, puzzle_dir_t dir)
 
 // ---- Drawing ----
 
-static void draw_centered_text(const char *text, int center_x, int center_y, int scale, uint16_t color)
-{
-    // The font cell has one blank row at the bottom; ignore it when centring.
-    const int height = gfx_text_height(scale) - scale;
-    gfx_draw_text(center_x - gfx_text_width(text, scale) / 2, center_y - height / 2, text, scale, color);
-}
-
 // A horizontal or vertical line between two points, with square ends.
 static void draw_line(int x1, int y1, int x2, int y2, int thickness, uint16_t color)
 {
@@ -223,52 +224,196 @@ static void draw_line(int x1, int y1, int x2, int y2, int thickness, uint16_t co
     gfx_fill_rect(left - half, top - half, abs(x2 - x1) + thickness, abs(y2 - y1) + thickness, color);
 }
 
-// A straight piece of line from a node to a point, ending in a round tip
-// instead of a square one.
+// A straight piece of line from (from_x, from_y) to (to_x, to_y), with a square
+// corner at the start node and a rounded cap of the same width at the head.
 static void draw_rounded_stub(int from_x, int from_y, int to_x, int to_y, int width, uint16_t color)
 {
     const int half = width / 2;
-    const int dx = to_x > from_x ? 1 : to_x < from_x ? -1 : 0, dy = to_y > from_y ? 1 : to_y < from_y ? -1 : 0;
-    draw_line(from_x, from_y, to_x - dx * half, to_y - dy * half, width, color);
+    if (to_x > from_x) {
+        gfx_fill_rect(from_x - half, from_y - half, to_x - from_x + half + 1, width, color);
+    } else if (to_x < from_x) {
+        gfx_fill_rect(to_x, from_y - half, from_x - to_x + half + 1, width, color);
+    } else if (to_y > from_y) {
+        gfx_fill_rect(from_x - half, from_y - half, width, to_y - from_y + half + 1, color);
+    } else if (to_y < from_y) {
+        gfx_fill_rect(from_x - half, to_y, width, from_y - to_y + half + 1, color);
+    }
     gfx_fill_circle(to_x, to_y, half, color);
 }
 
-
-static void draw_diamond(int cx, int cy, int half, uint16_t color)
+// An upward-pointing equilateral triangle, optically centred on (cx, cy),
+// anti-aliased with 4x4 sub-pixel supersampling.
+static void draw_triangle(int cx, int cy, int half_w, int h, uint16_t color)
 {
-    for (int dy = -half; dy <= half; dy++) {
-        const int w = half - abs(dy);
-        gfx_fill_rect(cx - w, cy + dy, 2 * w + 1, 1, color);
+    const int top = cy - (h * 55) / 100;
+    const int h8 = 8 * h > 0 ? 8 * h : 1;
+    const int w8 = 8 * half_w + 4;
+    for (int py = top - 1; py <= top + h; py++) {
+        for (int px = cx - half_w - 1; px <= cx + half_w + 1; px++) {
+            int hits = 0;
+            for (int sy = 0; sy < 4; sy++) {
+                const int qy = 8 * (py - top) + 2 * sy + 1;
+                if (qy < 0 || qy > h8) {
+                    continue;
+                }
+                for (int sx = 0; sx < 4; sx++) {
+                    const int qx = 8 * (px - cx) + 2 * sx - 3;
+                    if (abs(qx) * h8 <= qy * w8) {
+                        hits++;
+                    }
+                }
+            }
+            if (hits > 0) {
+                gfx_blend_pixel(px, py, color, (uint8_t)((hits * 255 + 8) / 16));
+            }
+        }
+    }
+}
+
+// A flat-topped regular hexagon of horizontal radius r, centred on (cx, cy),
+// anti-aliased with 4x4 sub-pixel supersampling.
+static void draw_hexagon(int cx, int cy, int r, uint16_t color)
+{
+    const int r8 = 8 * r + 4;
+    const int h8 = (r8 * 866 + 500) / 1000;
+    const int h = h8 / 8 + 1;
+    for (int dy = -h; dy <= h; dy++) {
+        for (int dx = -r - 1; dx <= r + 1; dx++) {
+            int hits = 0;
+            for (int sy = 0; sy < 4; sy++) {
+                const int qy = abs(8 * dy + 2 * sy - 3);
+                if (qy > h8) {
+                    continue;
+                }
+                for (int sx = 0; sx < 4; sx++) {
+                    const int qx = abs(8 * dx + 2 * sx - 3);
+                    if (2 * qx * h8 + qy * r8 <= 2 * r8 * h8) {
+                        hits++;
+                    }
+                }
+            }
+            if (hits > 0) {
+                gfx_blend_pixel(cx + dx, cy + dy, color, (uint8_t)((hits * 255 + 8) / 16));
+            }
+        }
+    }
+}
+
+// An 8-pointed star (octagram): the union of an axis-aligned square and a
+// 45-degree rotated diamond of the same side length, 4x4 anti-aliased.
+static void draw_star(int cx, int cy, int half_side, uint16_t color)
+{
+    const int s8 = 8 * half_side + 4;
+    const int d8 = (s8 * 1414 + 500) / 1000;
+    const int ext = d8 / 8 + 1;
+    for (int dy = -ext; dy <= ext; dy++) {
+        for (int dx = -ext; dx <= ext; dx++) {
+            int hits = 0;
+            for (int sy = 0; sy < 4; sy++) {
+                const int qy = abs(8 * dy + 2 * sy - 3);
+                for (int sx = 0; sx < 4; sx++) {
+                    const int qx = abs(8 * dx + 2 * sx - 3);
+                    if ((qx <= s8 && qy <= s8) || (qx + qy <= d8)) {
+                        hits++;
+                    }
+                }
+            }
+            if (hits > 0) {
+                gfx_blend_pixel(cx + dx, cy + dy, color, (uint8_t)((hits * 255 + 8) / 16));
+            }
+        }
+    }
+}
+
+// A polyomino shape made of small unit squares separated by thin gaps.
+static void draw_polyomino(int cx, int cy, int tile_size, uint8_t shape_idx, uint16_t color)
+{
+    const puzzle_poly_t *poly = &puzzle_polys[shape_idx];
+    const int box = tile_size * 15 / 100 >= 5 ? tile_size * 15 / 100 : 5;
+    const int gap = 2;
+    const int total_w = poly->width * box + (poly->width - 1) * gap;
+    const int total_h = poly->height * box + (poly->height - 1) * gap;
+    const int x0 = cx - total_w / 2;
+    const int y0 = cy - total_h / 2;
+    for (int r = 0; r < poly->height; r++) {
+        for (int c = 0; c < poly->width; c++) {
+            if (poly->mask & (1u << (r * 4 + c))) {
+                gfx_fill_rect(x0 + c * (box + gap), y0 + r * (box + gap), box, box, color);
+            }
+        }
+    }
+}
+
+// The 3-pronged elimination symbol: one spoke straight up, two at 120 degrees
+// down-left and down-right, anti-aliased with 4x4 sub-pixel supersampling.
+static void draw_negator(int cx, int cy, int tile_size, uint16_t color)
+{
+    const int len = tile_size * 22 / 100 >= 6 ? tile_size * 22 / 100 : 6;
+    const int r = tile_size / 22 >= 2 ? tile_size / 22 : 2;
+    const int hub_y = cy + len / 4;
+    const int l8 = 8 * len;
+    const int r8 = 8 * r + 3;
+    const int r8_sq = r8 * r8;
+    const int dirs[3][2] = {{0, -1000}, {-866, 500}, {866, 500}};
+    const int ext = len + r + 2;
+
+    for (int dy = -len - r - 2; dy <= len / 2 + r + 2; dy++) {
+        for (int dx = -ext; dx <= ext; dx++) {
+            int hits = 0;
+            for (int sy = 0; sy < 4; sy++) {
+                const int qy = 8 * dy + 2 * sy - 3;
+                for (int sx = 0; sx < 4; sx++) {
+                    const int qx = 8 * dx + 2 * sx - 3;
+                    for (int k = 0; k < 3; k++) {
+                        int proj = (qx * dirs[k][0] + qy * dirs[k][1]) / 1000;
+                        if (proj < 0) proj = 0;
+                        if (proj > l8) proj = l8;
+                        const int ex = qx - (proj * dirs[k][0]) / 1000;
+                        const int ey = qy - (proj * dirs[k][1]) / 1000;
+                        if (ex * ex + ey * ey <= r8_sq) {
+                            hits++;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (hits > 0) {
+                gfx_blend_pixel(cx + dx, hub_y + dy, color, (uint8_t)((hits * 255 + 8) / 16));
+            }
+        }
     }
 }
 
 static int beacon_radius(void)
 {
-    return g.path_width / 2;  // small enough for the line to cover a beacon it passes
+    const int r = g.track_width / 2 - 1;
+    return r >= 3 ? r : 3;  // fits inside the channel and is covered by the line
 }
 
 static void draw_grid_edge(int x1, int y1, int x2, int y2, puzzle_edge_t kind)
 {
-    draw_line(x1, y1, x2, y2, g.track_width, COLOR_TRACK);
     if (kind == EDGE_GAP) {
-        // Plug the middle of the channel with tile.
-        const int plug_x = (x2 - x1) * 3 / 10, plug_y = (y2 - y1) * 3 / 10;
-        draw_line(x1 + plug_x, y1 + plug_y, x2 - plug_x, y2 - plug_y, g.track_width, COLOR_TILE);
-    } else if (kind == EDGE_BEACON) {
-        gfx_fill_circle((x1 + x2) / 2, (y1 + y2) / 2, beacon_radius(), COLOR_BEACON);
+        const int stub_x = (x2 - x1) * 3 / 10, stub_y = (y2 - y1) * 3 / 10;
+        draw_line(x1, y1, x1 + stub_x, y1 + stub_y, g.track_width, COLOR_TRACK);
+        draw_line(x2 - stub_x, y2 - stub_y, x2, y2, g.track_width, COLOR_TRACK);
+        return;
+    }
+    draw_line(x1, y1, x2, y2, g.track_width, COLOR_TRACK);
+    if (kind == EDGE_BEACON) {
+        draw_hexagon((x1 + x2) / 2, (y1 + y2) / 2, beacon_radius(), COLOR_BEACON);
     }
 }
 
 static void draw_missed_beacon(int x, int y)
 {
-    gfx_fill_circle(x, y, beacon_radius() + 3, COLOR_FAILED);
-    gfx_fill_circle(x, y, beacon_radius(), COLOR_BEACON);
+    draw_hexagon(x, y, beacon_radius() + 3, COLOR_FAILED);
+    draw_hexagon(x, y, beacon_radius(), COLOR_BEACON);
 }
 
 // The start marker and the line, over the board.
 static void draw_line_layer(void)
 {
-    const bool failed = (g.state == STATE_FAILED);
+    const bool failed = (g.state == STATE_FAILED) && g.blink_on;
     const uint16_t path_color =
         g.state == STATE_SOLVED ? COLOR_SOLVED : failed ? COLOR_FAILED : COLOR_PATH;
 
@@ -284,21 +429,21 @@ static void draw_line_layer(void)
         for (int pass = 0; pass < 2; pass++) {
             const int width = pass == 0 ? g.path_width + 6 : g.path_width;
             const uint16_t color = pass == 0 ? halo : path_color;
-            for (int i = 0; i < g.path.length; i++) {
-                const int node = g.path.nodes[i];
-                if (i > 0) {
-                    const int prev = g.path.nodes[i - 1];
+            const bool has_tip_stub = line_in_cap() || g.tip_offset > 0;
+            for (int i = 1; i < g.path.length; i++) {
+                const int prev = g.path.nodes[i - 1], node = g.path.nodes[i];
+                if (i == g.path.length - 1 && !has_tip_stub) {
+                    draw_rounded_stub(node_x(prev), node_y(prev), node_x(node), node_y(node), width, color);
+                } else {
                     draw_line(node_x(prev), node_y(prev), node_x(node), node_y(node), width, color);
                 }
-                gfx_fill_circle(node_x(node), node_y(node), width / 2, color);
             }
             if (line_in_cap()) {
                 int end_x, end_y;
                 cap_end(head, &end_x, &end_y);
                 draw_rounded_stub(node_x(head), node_y(head), end_x, end_y, width, color);
-            } else {
-                draw_line(node_x(head), node_y(head), tip_x, tip_y, width, color);
-                gfx_fill_circle(tip_x, tip_y, width / 2 + 3, color);
+            } else if (g.tip_offset > 0) {
+                draw_rounded_stub(node_x(head), node_y(head), tip_x, tip_y, width, color);
             }
             // The start circle fills with light, leaving a rim of the channel.
             gfx_fill_circle(node_x(start), node_y(start), start_radius() - (pass == 0 ? 1 : 4), color);
@@ -340,10 +485,10 @@ static void draw_line_layer(void)
 static void draw_board(void)
 {
     const puzzle_t *p = &g.puzzle;
-    const bool failed = (g.state == STATE_FAILED);
+    const bool failed = (g.state == STATE_FAILED) && g.blink_on;
 
-    gfx_fill_rect(0, BOARD_CENTER_Y - BOARD_MAX_SIZE / 2 - BOARD_MARGIN, GAME_SCREEN_WIDTH,
-                  BOARD_MAX_SIZE + 2 * BOARD_MARGIN, COLOR_BACKGROUND);
+    gfx_fill_rect(0, BOARD_CENTER_Y - BOARD_MAX_HEIGHT / 2 - BOARD_MARGIN, GAME_SCREEN_WIDTH,
+                  BOARD_MAX_HEIGHT + 2 * BOARD_MARGIN, COLOR_BACKGROUND);
 
     // Tiles, then the channels between them
     const int tile_inset = g.track_width / 2 + 1, tile_size = g.cell_size - g.track_width;
@@ -367,11 +512,11 @@ static void draw_board(void)
     }
     for (int node = 0; node < puzzle_node_count(p); node++) {
         if (p->node_beacon[node]) {
-            gfx_fill_circle(node_x(node), node_y(node), beacon_radius(), COLOR_BEACON);
+            draw_hexagon(node_x(node), node_y(node), beacon_radius(), COLOR_BEACON);
         }
     }
 
-    // Clues on the tiles
+    // Clues on the tiles: triangles for edge counts, rounded squares for region colours
     for (int r = 0; r < p->rows; r++) {
         for (int c = 0; c < p->cols; c++) {
             const puzzle_cell_t *cell = &p->cells[r][c];
@@ -379,15 +524,35 @@ static void draw_board(void)
             const int cy = g.origin_y + r * g.cell_size + g.cell_size / 2;
             const bool bad = failed && g.result.bad_cell[r][c];
             if (cell->kind == CELL_COUNT) {
-                const char digit[] = {'0' + cell->value, '\0'};
-                draw_centered_text(digit, cx, cy, tile_size / 15, bad ? COLOR_FAILED : COLOR_COUNT);
-            } else if (cell->kind == CELL_GEM) {
-                const int half = tile_size / 4;
-                if (bad) {
-                    draw_diamond(cx, cy, half + 5, COLOR_FAILED);
+                const int n = cell->value;
+                const int half_w = tile_size / 10 >= 3 ? tile_size / 10 : 3;
+                const int w = 2 * half_w + 1;
+                const int h = (w * 87 + 50) / 100;
+                const int gap = tile_size / 16 > 2 ? tile_size / 16 : 2;
+                const int step = (w + gap + 1) & ~1;
+                const uint16_t color = bad ? COLOR_FAILED : COLOR_TRIANGLE;
+                for (int k = 0; k < n; k++) {
+                    const int tx = cx + (2 * k - (n - 1)) * (step / 2);
+                    draw_triangle(tx, cy, half_w, h, color);
                 }
-                draw_diamond(cx, cy, half + 3, COLOR_TRACK);  // a dark rim keeps every colour readable
-                draw_diamond(cx, cy, half, GEM_COLORS[cell->value]);
+            } else if (cell->kind == CELL_GEM) {
+                const int half = tile_size * 21 / 100 >= 4 ? tile_size * 21 / 100 : 4;
+                const int size = 2 * half + 1;
+                const int radius = half * 3 / 5 >= 3 ? half * 3 / 5 : 3;
+                if (bad) {
+                    gfx_fill_round_rect(cx - half - 3, cy - half - 3, size + 6, size + 6, radius + 2, COLOR_FAILED);
+                }
+                gfx_fill_round_rect(cx - half, cy - half, size, size, radius, GEM_COLORS[cell->value]);
+            } else if (cell->kind == CELL_STAR) {
+                const int half = tile_size * 17 / 100 >= 4 ? tile_size * 17 / 100 : 4;
+                if (bad) {
+                    draw_star(cx, cy, half + 2, COLOR_FAILED);
+                }
+                draw_star(cx, cy, half, GEM_COLORS[cell->value]);
+            } else if (cell->kind == CELL_POLY) {
+                draw_polyomino(cx, cy, tile_size, cell->value, bad ? COLOR_FAILED : COLOR_POLY);
+            } else if (cell->kind == CELL_NEGATOR) {
+                draw_negator(cx, cy, tile_size, bad ? COLOR_FAILED : COLOR_NEGATOR);
             }
         }
     }
@@ -451,6 +616,7 @@ static void redraw_line(void)
 static void set_state(state_t state)
 {
     g.state = state;
+    g.blink_on = true;
     g.state_since_ms = g.now_ms;
     draw_board();
 }
@@ -469,13 +635,14 @@ void game_load_level(int index)
         return;
     }
     g.level = index;
+    g.puzzle_id++;
     if (g.puzzle_source) {
         g.puzzle_source(index, &g.puzzle);
     } else {
         puzzle_generate(&g.puzzle, &levels[index], &g.seed, 0, NULL);
     }
 
-    const int by_width = BOARD_MAX_SIZE / g.puzzle.cols, by_height = BOARD_MAX_SIZE / g.puzzle.rows;
+    const int by_width = BOARD_MAX_WIDTH / g.puzzle.cols, by_height = BOARD_MAX_HEIGHT / g.puzzle.rows;
     g.cell_size = by_width < by_height ? by_width : by_height;
     if (g.cell_size > MAX_CELL_SIZE) {
         g.cell_size = MAX_CELL_SIZE;
@@ -519,6 +686,26 @@ int game_level(void)
     return g.level;
 }
 
+uint32_t game_puzzle_id(void)
+{
+    return g.puzzle_id;
+}
+
+int game_screen_fade(void)
+{
+    if (g.state == STATE_SOLVED) {
+        const uint32_t elapsed = g.now_ms - g.state_since_ms;
+        const uint32_t fade_start = SOLVED_PAUSE_MS - SOLVED_FADE_OUT_MS;
+        if (elapsed >= SOLVED_PAUSE_MS) {
+            return 0;
+        }
+        if (elapsed > fade_start) {
+            return (int)(255 * (SOLVED_PAUSE_MS - elapsed) / SOLVED_FADE_OUT_MS);
+        }
+    }
+    return 255;
+}
+
 bool game_is_solved(void)
 {
     return g.state == STATE_SOLVED;
@@ -543,12 +730,6 @@ void game_previous_level(void)
         game_load_level(g.level - 1);
         play(GAME_SOUND_LEVEL);
     }
-}
-
-void game_reset_line(void)
-{
-    clear_line();
-    play(GAME_SOUND_RESET);
 }
 
 // Slides the tip of the line along the channels towards the finger, adding
@@ -586,7 +767,10 @@ static void follow_finger(int x, int y)
             }
 
             if (target >= cell && limit == cell) {
-                puzzle_path_step(p, &g.path, dir);  // reached the next node
+                const puzzle_step_t step = puzzle_path_step(p, &g.path, dir);  // reached the next node
+                if (step != STEP_BLOCKED) {
+                    synth_trace_step(g.path.length, step == STEP_BACK);
+                }
                 g.tip_offset = 0;
                 continue;
             }
@@ -611,6 +795,7 @@ static void follow_finger(int x, int y)
             if (g.path.length >= 2 && next == g.path.nodes[g.path.length - 2]) {
                 // Backing up along the line: the tip is now in the channel it came from.
                 puzzle_path_step(p, &g.path, dir);
+                synth_trace_step(g.path.length, true);
                 g.tip_dir = (puzzle_dir_t)((dir + 2) % 4);
                 g.tip_offset = cell - 1;
                 moving = true;
@@ -639,10 +824,12 @@ static void on_touch_begin(int x, int y)
         g.tip_offset = 0;
         g.tracing = true;
         draw_board();
+        synth_trace_step(1, false);
         play(GAME_SOUND_TRACE);
     } else if (g.path.length > 1 && is_near(x, y, puzzle_path_head(&g.path))) {
         // Touching the head of an unfinished path picks it up again.
         g.tracing = true;
+        synth_trace_step(g.path.length, false);
         play(GAME_SOUND_TRACE);
     }
 }
@@ -695,9 +882,17 @@ void game_update(const game_touch_t *touch, uint32_t now_ms)
     }
 
     const uint32_t elapsed = now_ms - g.state_since_ms;
-    if (g.state == STATE_SOLVED && elapsed >= SOLVED_PAUSE_MS && g.level < level_count - 1) {
-        game_load_level(g.level + 1);
-    } else if (g.state == STATE_FAILED && elapsed >= FAILED_PAUSE_MS) {
-        clear_line();
+    if (g.state == STATE_SOLVED && elapsed >= SOLVED_PAUSE_MS) {
+        game_load_level(g.level < level_count - 1 ? g.level + 1 : g.level);
+    } else if (g.state == STATE_FAILED) {
+        if (elapsed >= FAILED_PAUSE_MS) {
+            clear_line();
+        } else {
+            const bool blink_on = ((elapsed / FAILED_BLINK_MS) % 2) == 0;
+            if (blink_on != g.blink_on) {
+                g.blink_on = blink_on;
+                draw_board();
+            }
+        }
     }
 }

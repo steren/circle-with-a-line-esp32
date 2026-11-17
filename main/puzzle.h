@@ -5,18 +5,24 @@
 // exit is always on the outer border.
 // The path is correct when it satisfies every clue on the board:
 //
-//   Beacon  (on a node or on a line)  the path must pass through it
-//   Gap     (a blocked line)          the path cannot use that line
-//   Count   (a digit in a cell)       exactly that many of the cell's four
-//                                     sides are part of the path
-//   Gem     (a colour in a cell)      the path splits the board into areas;
-//                                     no area may hold gems of two colours
+//   Beacon    (on a node or on a line)  the path must pass through it
+//   Gap       (a blocked line)          the path cannot use that line
+//   Count     (1-3 triangles in a cell) that many of the cell's four sides are
+//                                       part of the path
+//   Gem       (a rounded square)        the path splits the board into areas;
+//                                       no area may hold squares of two colours
+//   Star      (an 8-pointed star)       its area must hold exactly two symbols
+//                                       (stars or squares) of its colour
+//   Polyomino (a Tetris shape)          the area must be tiled by the shapes
+//                                       inside it, without rotation
+//   Negator   (a 3-pronged Y)           cancels one broken symbol in its area
 //
 // Puzzles are written as text maps, one character per node, line and cell:
 //
 //   "+-+-E"     nodes: + plain, S start, E exit (border only), o beacon
 //   "|1|a|"     lines: - or | open, space = gap, o = beacon
-//   "S-+o+"     cells: space = empty, 0-3 = count, a/b/c = gem colour
+//   "S-+o+"     cells: space = empty, 0-3 = count, a-c = square, A-C = star,
+//                      d-s = polyomino shape, Y = negator
 
 #pragma once
 
@@ -28,11 +34,27 @@
 #define PUZZLE_MAX_NODES ((PUZZLE_MAX_COLS + 1) * (PUZZLE_MAX_ROWS + 1))
 #define PUZZLE_MAX_CELLS (PUZZLE_MAX_COLS * PUZZLE_MAX_ROWS)
 #define PUZZLE_GEM_COLORS 3
+#define PUZZLE_POLY_SHAPES 16
 
-typedef enum { CELL_EMPTY, CELL_COUNT, CELL_GEM } puzzle_cell_kind_t;
+typedef enum {
+    CELL_EMPTY,
+    CELL_COUNT,
+    CELL_GEM,
+    CELL_STAR,
+    CELL_POLY,
+    CELL_NEGATOR,
+} puzzle_cell_kind_t;
 typedef enum { EDGE_OPEN, EDGE_GAP, EDGE_BEACON } puzzle_edge_t;
 typedef enum { DIR_UP, DIR_RIGHT, DIR_DOWN, DIR_LEFT } puzzle_dir_t;
 typedef enum { STEP_BLOCKED, STEP_FORWARD, STEP_BACK } puzzle_step_t;
+
+typedef struct {
+    uint8_t size;          // number of blocks (1-4)
+    uint8_t width, height; // bounding box dimensions (1-3)
+    uint16_t mask;         // 4x4 bitmask: bit (r * 4 + c) is set if block (r, c) is present
+} puzzle_poly_t;
+
+extern const puzzle_poly_t puzzle_polys[PUZZLE_POLY_SHAPES];
 
 typedef struct {
     uint8_t kind;   // puzzle_cell_kind_t
@@ -115,6 +137,13 @@ int puzzle_regions(const puzzle_t *p, const puzzle_path_t *path,
 
 // How many of a cell's four sides are part of the path.
 int puzzle_cell_sides(const puzzle_t *p, const puzzle_path_t *path, int row, int col);
+
+// Checks whether a single area (whose cells are listed in `area_cells[0..cell_count-1]`)
+// satisfies all cell clues inside it, given the number of path sides around each cell.
+// If `bad_cell` is not NULL and the area fails, marks the offending cells in `bad_cell`.
+bool puzzle_check_area(const puzzle_t *p, const uint8_t area_cells[][2], int cell_count,
+                       const uint8_t sides[PUZZLE_MAX_ROWS][PUZZLE_MAX_COLS],
+                       bool bad_cell[PUZZLE_MAX_ROWS][PUZZLE_MAX_COLS]);
 
 // True if the path ends on the exit and satisfies every clue. `result` may be
 // NULL; otherwise it reports which clues are broken.

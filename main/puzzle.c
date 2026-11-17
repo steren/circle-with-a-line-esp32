@@ -2,6 +2,29 @@
 
 #include <string.h>
 
+#define B(r, c) (1u << ((r) * 4 + (c)))
+
+const puzzle_poly_t puzzle_polys[PUZZLE_POLY_SHAPES] = {
+    {1, 1, 1, B(0, 0)},                                  // 0 ('d'): 1x1 monomino
+    {2, 2, 1, B(0, 0) | B(0, 1)},                        // 1 ('e'): 1x2 horizontal domino
+    {2, 1, 2, B(0, 0) | B(1, 0)},                        // 2 ('f'): 2x1 vertical domino
+    {3, 3, 1, B(0, 0) | B(0, 1) | B(0, 2)},              // 3 ('g'): 1x3 horizontal tromino
+    {3, 1, 3, B(0, 0) | B(1, 0) | B(2, 0)},              // 4 ('h'): 3x1 vertical tromino
+    {3, 2, 2, B(0, 0) | B(1, 0) | B(1, 1)},              // 5 ('i'): L-tromino #. / ##
+    {3, 2, 2, B(0, 1) | B(1, 0) | B(1, 1)},              // 6 ('j'): L-tromino .# / ##
+    {3, 2, 2, B(0, 0) | B(0, 1) | B(1, 0)},              // 7 ('k'): L-tromino ## / #.
+    {3, 2, 2, B(0, 0) | B(0, 1) | B(1, 1)},              // 8 ('l'): L-tromino ## / .#
+    {4, 2, 2, B(0, 0) | B(0, 1) | B(1, 0) | B(1, 1)},    // 9 ('m'): 2x2 O-tetromino
+    {4, 3, 2, B(0, 0) | B(0, 1) | B(0, 2) | B(1, 1)},    // 10 ('n'): T-tetromino ### / .#.
+    {4, 3, 2, B(0, 1) | B(1, 0) | B(1, 1) | B(1, 2)},    // 11 ('o'): T-tetromino .#. / ###
+    {4, 3, 2, B(0, 0) | B(1, 0) | B(1, 1) | B(1, 2)},    // 12 ('p'): L-tetromino #.. / ###
+    {4, 3, 2, B(0, 2) | B(1, 0) | B(1, 1) | B(1, 2)},    // 13 ('q'): J-tetromino ..# / ###
+    {4, 3, 2, B(0, 1) | B(0, 2) | B(1, 0) | B(1, 1)},    // 14 ('r'): S-tetromino .## / ##.
+    {4, 3, 2, B(0, 0) | B(0, 1) | B(1, 1) | B(1, 2)},    // 15 ('s'): Z-tetromino ##. / .##
+};
+
+#undef B
+
 // Which lines the path runs along, in the same layout as puzzle_t's edges.
 typedef struct {
     bool h[PUZZLE_MAX_ROWS + 1][PUZZLE_MAX_COLS];
@@ -71,6 +94,15 @@ bool puzzle_parse(puzzle_t *p, const char *map)
                 } else if (ch >= 'a' && ch < 'a' + PUZZLE_GEM_COLORS) {
                     cell->kind = CELL_GEM;
                     cell->value = ch - 'a';
+                } else if (ch >= 'A' && ch < 'A' + PUZZLE_GEM_COLORS) {
+                    cell->kind = CELL_STAR;
+                    cell->value = ch - 'A';
+                } else if (ch >= 'd' && ch < 'd' + PUZZLE_POLY_SHAPES) {
+                    cell->kind = CELL_POLY;
+                    cell->value = ch - 'd';
+                } else if (ch == 'Y') {
+                    cell->kind = CELL_NEGATOR;
+                    cell->value = 0;
                 } else if (ch != ' ') {
                     return false;
                 }
@@ -227,6 +259,195 @@ int puzzle_cell_sides(const puzzle_t *p, const puzzle_path_t *path, int row, int
     return cell_sides(&used, row, col);
 }
 
+static uint64_t poly_board_mask(uint8_t shape_idx, int r0, int c0)
+{
+    const uint16_t m = puzzle_polys[shape_idx].mask;
+    uint64_t out = 0;
+    for (int r = 0; r < 4; r++) {
+        const uint64_t row_bits = (m >> (r * 4)) & 0xF;
+        out |= row_bits << ((r0 + r) * PUZZLE_MAX_COLS + c0);
+    }
+    return out;
+}
+
+static bool can_tile_area(const puzzle_t *p, uint64_t remaining, const uint8_t *shapes, int count)
+{
+    if (count == 0) {
+        return remaining == 0;
+    }
+    const uint8_t s = shapes[0];
+    const puzzle_poly_t *sh = &puzzle_polys[s];
+    if (count == 1) {
+        const int first_bit = __builtin_ctzll(remaining);
+        const int r_first = first_bit / PUZZLE_MAX_COLS;
+        const int c_first = first_bit % PUZZLE_MAX_COLS;
+        const int shape_first_col = __builtin_ctz(sh->mask & 0xF);
+        const int r0 = r_first;
+        const int c0 = c_first - shape_first_col;
+        if (r0 < 0 || c0 < 0 || r0 + sh->height > p->rows || c0 + sh->width > p->cols) {
+            return false;
+        }
+        return poly_board_mask(s, r0, c0) == remaining;
+    }
+    for (int r0 = 0; r0 <= p->rows - sh->height; r0++) {
+        for (int c0 = 0; c0 <= p->cols - sh->width; c0++) {
+            const uint64_t pm = poly_board_mask(s, r0, c0);
+            if ((remaining & pm) == pm && can_tile_area(p, remaining ^ pm, shapes + 1, count - 1)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool eval_area_clues(const puzzle_t *p, uint64_t area_mask, int cell_count,
+                            const uint8_t clues[][2], int clue_count,
+                            const uint8_t sides[PUZZLE_MAX_ROWS][PUZZLE_MAX_COLS],
+                            uint64_t cancel_mask, uint64_t *bad_mask_out)
+{
+    uint64_t bad = 0;
+    uint8_t gem_colors = 0;
+    uint8_t color_counts[PUZZLE_GEM_COLORS] = {0};
+    uint8_t poly_shapes[PUZZLE_MAX_CELLS];
+    uint8_t poly_indices[PUZZLE_MAX_CELLS];
+    int poly_count = 0, poly_size_sum = 0;
+
+    for (int i = 0; i < clue_count; i++) {
+        if ((cancel_mask >> i) & 1) {
+            continue;
+        }
+        const int r = clues[i][0], c = clues[i][1];
+        const puzzle_cell_t *cell = &p->cells[r][c];
+        switch (cell->kind) {
+        case CELL_COUNT:
+            if (sides[r][c] != cell->value) {
+                bad |= 1ULL << i;
+            }
+            break;
+        case CELL_GEM:
+            gem_colors |= 1u << cell->value;
+            color_counts[cell->value]++;
+            break;
+        case CELL_STAR:
+            color_counts[cell->value]++;
+            break;
+        case CELL_POLY:
+            poly_shapes[poly_count] = cell->value;
+            poly_indices[poly_count] = i;
+            poly_count++;
+            poly_size_sum += puzzle_polys[cell->value].size;
+            break;
+        default:
+            break;
+        }
+    }
+
+    const bool gem_conflict = (gem_colors & (gem_colors - 1)) != 0;
+    for (int i = 0; i < clue_count; i++) {
+        if ((cancel_mask >> i) & 1) {
+            continue;
+        }
+        const puzzle_cell_t *cell = &p->cells[clues[i][0]][clues[i][1]];
+        if (cell->kind == CELL_GEM && gem_conflict) {
+            bad |= 1ULL << i;
+        } else if (cell->kind == CELL_STAR && color_counts[cell->value] != 2) {
+            bad |= 1ULL << i;
+        }
+    }
+
+    if (poly_count > 0) {
+        if (poly_size_sum != cell_count || !can_tile_area(p, area_mask, poly_shapes, poly_count)) {
+            for (int k = 0; k < poly_count; k++) {
+                bad |= 1ULL << poly_indices[k];
+            }
+        }
+    }
+
+    if (bad_mask_out) {
+        *bad_mask_out = bad;
+    }
+    return bad == 0;
+}
+
+static bool can_cancel_clues(const puzzle_t *p, uint64_t area_mask, int cell_count,
+                             const uint8_t clues[][2], int clue_count,
+                             const uint8_t sides[PUZZLE_MAX_ROWS][PUZZLE_MAX_COLS],
+                             int start_idx, int left, uint64_t cancel_mask)
+{
+    if (left == 0) {
+        return eval_area_clues(p, area_mask, cell_count, clues, clue_count, sides, cancel_mask, NULL);
+    }
+    for (int i = start_idx; i <= clue_count - left; i++) {
+        if (can_cancel_clues(p, area_mask, cell_count, clues, clue_count, sides, i + 1, left - 1,
+                             cancel_mask | (1ULL << i))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool puzzle_check_area(const puzzle_t *p, const uint8_t area_cells[][2], int cell_count,
+                       const uint8_t sides[PUZZLE_MAX_ROWS][PUZZLE_MAX_COLS],
+                       bool bad_cell[PUZZLE_MAX_ROWS][PUZZLE_MAX_COLS])
+{
+    uint64_t area_mask = 0;
+    uint8_t negators[PUZZLE_MAX_CELLS][2];
+    uint8_t clues[PUZZLE_MAX_CELLS][2];
+    int neg_count = 0, clue_count = 0;
+
+    for (int i = 0; i < cell_count; i++) {
+        const int r = area_cells[i][0], c = area_cells[i][1];
+        area_mask |= 1ULL << (r * PUZZLE_MAX_COLS + c);
+        const uint8_t kind = p->cells[r][c].kind;
+        if (kind == CELL_NEGATOR) {
+            negators[neg_count][0] = r;
+            negators[neg_count++][1] = c;
+        } else if (kind != CELL_EMPTY) {
+            clues[clue_count][0] = r;
+            clues[clue_count++][1] = c;
+        }
+    }
+
+    if (neg_count == 0 && clue_count == 0) {
+        return true;
+    }
+
+    uint64_t bad0 = 0;
+    const bool ok0 = eval_area_clues(p, area_mask, cell_count, clues, clue_count, sides, 0, &bad0);
+    if (neg_count == 0) {
+        if (ok0) {
+            return true;
+        }
+        if (bad_cell) {
+            for (int i = 0; i < clue_count; i++) {
+                if ((bad0 >> i) & 1) {
+                    bad_cell[clues[i][0]][clues[i][1]] = true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Each negator must eliminate an error: if the area is already valid on its
+    // own, or has fewer clues than negators, the negators fail.
+    if (!ok0 && clue_count >= neg_count &&
+        can_cancel_clues(p, area_mask, cell_count, clues, clue_count, sides, 0, neg_count, 0)) {
+        return true;
+    }
+
+    if (bad_cell) {
+        for (int i = 0; i < neg_count; i++) {
+            bad_cell[negators[i][0]][negators[i][1]] = true;
+        }
+        for (int i = 0; i < clue_count; i++) {
+            if ((bad0 >> i) & 1) {
+                bad_cell[clues[i][0]][clues[i][1]] = true;
+            }
+        }
+    }
+    return false;
+}
+
 bool puzzle_check(const puzzle_t *p, const puzzle_path_t *path, puzzle_result_t *result)
 {
     puzzle_result_t local;
@@ -267,38 +488,28 @@ bool puzzle_check(const puzzle_t *p, const puzzle_path_t *path, puzzle_result_t 
         }
     }
 
-    // Counts
+    // Cell clues per area (counts, squares, stars, polyominoes, negators)
+    uint8_t sides[PUZZLE_MAX_ROWS][PUZZLE_MAX_COLS];
     for (int r = 0; r < p->rows; r++) {
         for (int c = 0; c < p->cols; c++) {
-            const puzzle_cell_t *cell = &p->cells[r][c];
-            if (cell->kind == CELL_COUNT && cell_sides(&used, r, c) != cell->value) {
-                result->bad_cell[r][c] = true;
-                ok = false;
-            }
+            sides[r][c] = cell_sides(&used, r, c);
         }
     }
-
-    // Gems: an area holding more than one colour is wrong.
     uint8_t region[PUZZLE_MAX_ROWS][PUZZLE_MAX_COLS];
     const int region_count = find_regions(p, &used, region);
-    uint8_t colors[PUZZLE_MAX_CELLS] = {0};  // bit mask of gem colours per area
-    for (int r = 0; r < p->rows; r++) {
-        for (int c = 0; c < p->cols; c++) {
-            if (p->cells[r][c].kind == CELL_GEM) {
-                colors[region[r][c]] |= 1 << p->cells[r][c].value;
-            }
-        }
-    }
     for (int i = 0; i < region_count; i++) {
-        if (colors[i] & (colors[i] - 1)) {  // more than one bit set
-            ok = false;
-            for (int r = 0; r < p->rows; r++) {
-                for (int c = 0; c < p->cols; c++) {
-                    if (region[r][c] == i && p->cells[r][c].kind == CELL_GEM) {
-                        result->bad_cell[r][c] = true;
-                    }
+        uint8_t area_cells[PUZZLE_MAX_CELLS][2];
+        int count = 0;
+        for (int r = 0; r < p->rows; r++) {
+            for (int c = 0; c < p->cols; c++) {
+                if (region[r][c] == i) {
+                    area_cells[count][0] = r;
+                    area_cells[count++][1] = c;
                 }
             }
+        }
+        if (!puzzle_check_area(p, area_cells, count, sides, result->bad_cell)) {
+            ok = false;
         }
     }
 

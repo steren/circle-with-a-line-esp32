@@ -22,7 +22,6 @@ typedef enum {
     GAME_SOUND_LIFT,    // the finger let go of an unfinished line
     GAME_SOUND_SOLVED,
     GAME_SOUND_FAILED,
-    GAME_SOUND_RESET,   // the line was cleared
     GAME_SOUND_LEVEL,   // another puzzle was selected
 } game_sound_t;
 
@@ -48,10 +47,11 @@ void game_update(const game_touch_t *touch, uint32_t now_ms);
 // Button actions.
 void game_next_level(void);
 void game_previous_level(void);
-void game_reset_line(void);
 
 void game_load_level(int index);
 int game_level(void);
+uint32_t game_puzzle_id(void);
+int game_screen_fade(void);
 bool game_is_solved(void);
 
 // The puzzle on screen.

@@ -1,75 +1,69 @@
 #include "synth.h"
 
 #include <math.h>
+#include <string.h>
 
 #define TWO_PI (2.0f * (float)M_PI)
 
-// The hum: one steady note. The board's speaker is very quiet below about
-// 500 Hz (measured with its own microphone), so the hum is built mostly from
-// harmonics: the ear still hears the low note, but the sound that carries is
-// an octave or two above it.
-#define HUM_AMPLITUDE 4800.0f  // of 32767
-#define HUM_HZ 440.0f
-#define HUM_DETUNE 1.006f      // a second, slightly sharp voice makes it beat gently
-#define HUM_FADE 0.0015f       // per sample: fades in and out over about 40 ms
-#define HUM_SILENT 0.001f      // gain below which the hum counts as off
+// The board's speaker rolls off steeply below ~500 Hz, so low tones are built
+// with strong 2nd-5th harmonics: the ear still perceives the warm low pitch,
+// while the upper harmonics carry clearly through the small speaker.
+#define HUM_AMPLITUDE 6600.0f  // of 32767
+#define HUM_HZ 220.0f          // warm A3 fundamental (heard via 440/660/880 Hz harmonics)
+#define HUM_DETUNE 1.005f      // slightly sharp chorus voice for gentle beating
+#define HUM_LFO_HZ 2.6f        // slow electrical pulse while tracing
+#define HUM_FADE_IN 0.0025f    // ~25 ms smooth swell when touching the start node
+#define HUM_FADE_OUT 0.0022f   // fades to < HUM_SILENT within ~200 ms on lift
+#define HUM_SILENT 0.001f
 
-// The phrases: plucked notes played one after another.
-#define NOTE_AMPLITUDE 6300.0f
-#define NOTE_ATTACK_MS 4       // fade-in that keeps a note from starting with a click
-#define CUT_SAMPLES 64         // fade-out when a new phrase cuts off the old one
-#define MAX_NOTES 4
-
-typedef struct {
-    uint16_t frequency_hz;
-    uint16_t duration_ms;
-} note_t;
+#define NOTE_AMPLITUDE 8200.0f
+#define CUT_SAMPLES 64         // smooth fade-out when a new phrase interrupts an active one
 
 static struct {
     bool hum_on;
-    float hum_gain, hum_phase, hum_phase2;
+    float hum_gain, hum_bloom, hum_pitch, hum_target_pitch;
+    float step_pulse;
+    bool step_back;
+    float hum_phase, hum_phase2, hum_lfo_phase;
 
-    note_t notes[MAX_NOTES];
-    int note_count, note_index, note_position;
-    float note_phase, note_envelope;
+    game_sound_t phrase;
+    int phrase_pos, phrase_len;
+    float p1, p2, p3, p4, p5;  // oscillator phases for polyphonic/swept phrases
 
-    bool next_waiting;  // a phrase is waiting for the current one to fade out
+    bool next_waiting;
     game_sound_t next;
     int cut_left;
 } s;
 
-static int notes_for(game_sound_t sound, note_t notes[MAX_NOTES])
+static float wrap(float phase)
+{
+    while (phase >= TWO_PI) {
+        phase -= TWO_PI;
+    }
+    return phase;
+}
+
+static int phrase_duration_samples(game_sound_t sound)
 {
     switch (sound) {
     case GAME_SOUND_SOLVED:
-        notes[0] = (note_t){523, 90};
-        notes[1] = (note_t){659, 90};
-        notes[2] = (note_t){784, 90};
-        notes[3] = (note_t){1047, 350};
-        return 4;
+        return SYNTH_SAMPLE_RATE * 800 / 1000;  // latch click + two-step chime + cable power surge
     case GAME_SOUND_FAILED:
-        notes[0] = (note_t){233, 140};
-        notes[1] = (note_t){175, 300};
-        return 2;
-    case GAME_SOUND_RESET:
-        notes[0] = (note_t){392, 80};
-        return 1;
+        return SYNTH_SAMPLE_RATE * 460 / 1000;  // low dissonant electrical rejection buzz
     case GAME_SOUND_LEVEL:
-        notes[0] = (note_t){784, 50};
-        notes[1] = (note_t){1047, 80};
-        return 2;
+        return SYNTH_SAMPLE_RATE * 130 / 1000;  // subtle panel wake-up fifth
     default:
         return 0;
     }
 }
 
-static float wrap(float phase)
-{
-    return phase >= TWO_PI ? phase - TWO_PI : phase;
-}
-
 void synth_hum_on(void)
 {
+    if (!s.hum_on) {
+        s.hum_bloom = 1.0f;  // subtle initial activation pulse when grabbing the start circle
+        s.hum_pitch = 1.0f;
+        s.hum_target_pitch = 1.0f;
+    }
     s.hum_on = true;
 }
 
@@ -78,17 +72,28 @@ void synth_hum_off(void)
     s.hum_on = false;
 }
 
+void synth_trace_step(int path_length, bool stepped_back)
+{
+    const int steps = path_length > 1 ? path_length - 1 : 0;
+    float target = 1.0f + 0.014f * (float)steps;
+    if (target > 1.35f) target = 1.35f;
+    s.hum_target_pitch = target;
+    s.step_pulse = 1.0f;
+    s.step_back = stepped_back;
+}
+
 static void start_phrase(game_sound_t sound)
 {
-    s.note_count = notes_for(sound, s.notes);
-    s.note_index = 0;
-    s.note_position = 0;
+    s.phrase = sound;
+    s.phrase_pos = 0;
+    s.phrase_len = phrase_duration_samples(sound);
+    s.p1 = s.p2 = s.p3 = s.p4 = s.p5 = 0.0f;
     s.next_waiting = false;
 }
 
 void synth_phrase(game_sound_t sound)
 {
-    if (s.note_index < s.note_count) {
+    if (s.phrase_pos < s.phrase_len) {
         s.next = sound;
         if (!s.next_waiting) {
             s.next_waiting = true;
@@ -101,55 +106,144 @@ void synth_phrase(game_sound_t sound)
 
 bool synth_is_silent(void)
 {
-    return !s.hum_on && s.hum_gain < HUM_SILENT && s.note_index >= s.note_count && !s.next_waiting;
+    return !s.hum_on && s.hum_gain < HUM_SILENT && s.phrase_pos >= s.phrase_len && !s.next_waiting;
+}
+
+static float render_phrase_sample(void)
+{
+    const float t = (float)s.phrase_pos / SYNTH_SAMPLE_RATE;
+    const int attack = SYNTH_SAMPLE_RATE * 5 / 1000;
+    float env = s.phrase_pos < attack ? (float)s.phrase_pos / attack : 1.0f;
+    float out = 0.0f;
+
+    switch (s.phrase) {
+    case GAME_SOUND_SOLVED: {
+        // 1. Mechanical/electrical relay latch as the line locks into the exit cap.
+        const float latch_freq = 196.0f + 340.0f * expf(-t * 55.0f);
+        s.p1 = wrap(s.p1 + TWO_PI * latch_freq / SYNTH_SAMPLE_RATE);
+        const float latch = expf(-t * 38.0f) * (0.6f * sinf(s.p1) + 0.4f * sinf(2.0f * s.p1));
+
+        // 2. First resonant tone (G4 = 392 Hz + upper harmonics), swelling in at t = 0.
+        s.p2 = wrap(s.p2 + TWO_PI * 392.00f / SYNTH_SAMPLE_RATE);
+        const float env1 = (1.0f - expf(-t * 80.0f)) * expf(-t * 5.2f);
+        const float tone1 = env1 * (0.35f * sinf(s.p2) + 0.45f * sinf(2.0f * s.p2) + 0.20f * sinf(3.0f * s.p2));
+
+        // 3. Second ascending chime (D5 = 587.33 Hz + G5 = 783.99 Hz + B5 = 987.77 Hz
+        // with a slightly detuned chorus voice) blooming in at t = 110 ms.
+        float tone2 = 0.0f;
+        if (t >= 0.11f) {
+            const float dt = t - 0.11f;
+            s.p3 = wrap(s.p3 + TWO_PI * 587.33f / SYNTH_SAMPLE_RATE);  // D5
+            s.p4 = wrap(s.p4 + TWO_PI * 783.99f / SYNTH_SAMPLE_RATE);  // G5
+            s.p5 = wrap(s.p5 + TWO_PI * 787.20f / SYNTH_SAMPLE_RATE);  // G5 chorus shimmer
+            const float env2 = (1.0f - expf(-dt * 45.0f)) * expf(-dt * 3.6f);
+            tone2 = env2 * (0.38f * sinf(s.p3) + 0.34f * sinf(s.p4) + 0.22f * sinf(s.p5) +
+                            0.16f * sinf(2.0f * s.p3));
+        }
+
+        // 4. Rising electrical cable power-surge hum beneath the chime.
+        const float surge_env = (1.0f - expf(-t * 14.0f)) * expf(-t * 4.5f);
+        const float flutter = 0.85f + 0.15f * sinf(TWO_PI * 20.0f * t);
+        const float surge = surge_env * flutter * (0.4f * sinf(2.0f * s.p1) + 0.3f * sinf(3.0f * s.p1));
+
+        out = 0.45f * latch + 0.75f * tone1 + 0.95f * tone2 + 0.35f * surge;
+        break;
+    }
+    case GAME_SOUND_FAILED: {
+        // Low, gritty dissonant electrical buzz / rejection thud: two closely-spaced
+        // low fundamentals (minor second + tritone) rich in 3rd-6th harmonics, sagging
+        // in pitch with a double-thud envelope.
+        const float droop = 1.0f - 0.18f * (t / 0.46f);
+        const float f1 = 146.8f * droop;  // D3
+        const float f2 = 155.6f * droop;  // Eb3 (minor second beating against D3)
+        const float f3 = 207.7f * droop;  // G#3 (tritone)
+
+        s.p1 = wrap(s.p1 + TWO_PI * f1 / SYNTH_SAMPLE_RATE);
+        s.p2 = wrap(s.p2 + TWO_PI * f2 / SYNTH_SAMPLE_RATE);
+        s.p3 = wrap(s.p3 + TWO_PI * f3 / SYNTH_SAMPLE_RATE);
+
+        const float pulse1 = expf(-t * 14.0f);
+        const float dt = t - 0.11f;
+        const float pulse2 = t >= 0.11f ? (1.0f - expf(-dt * 60.0f)) * expf(-dt * 8.5f) : 0.0f;
+        const float buzz_env = 0.70f * pulse1 + 0.90f * pulse2;
+
+        const float v1 = 0.25f * sinf(s.p1) + 0.45f * sinf(3.0f * s.p1) + 0.30f * sinf(5.0f * s.p1);
+        const float v2 = 0.25f * sinf(s.p2) + 0.45f * sinf(3.0f * s.p2) + 0.25f * sinf(4.0f * s.p2);
+        const float v3 = 0.30f * sinf(2.0f * s.p3) + 0.20f * sinf(3.0f * s.p3);
+        out = 1.65f * buzz_env * (0.45f * v1 + 0.40f * v2 + 0.25f * v3);
+        break;
+    }
+    case GAME_SOUND_LEVEL: {
+        // Soft resonant two-step wake pulse when switching panels.
+        s.p1 = wrap(s.p1 + TWO_PI * 440.0f / SYNTH_SAMPLE_RATE);
+        s.p2 = wrap(s.p2 + TWO_PI * 659.25f / SYNTH_SAMPLE_RATE);
+        const float env1 = expf(-t * 24.0f);
+        const float dt = t - 0.04f;
+        const float env2 = dt > 0.0f ? (1.0f - expf(-dt * 250.0f)) * expf(-dt * 22.0f) : 0.0f;
+        out = 0.65f * env1 * (0.7f * sinf(s.p1) + 0.3f * sinf(2.0f * s.p1)) +
+              0.85f * env2 * (0.7f * sinf(s.p2) + 0.3f * sinf(2.0f * s.p2));
+        break;
+    }
+    default:
+        break;
+    }
+
+    // Fade the last 4 ms smoothly to zero so a phrase never ends with a step.
+    const int tail = SYNTH_SAMPLE_RATE * 4 / 1000;
+    const int left = s.phrase_len - s.phrase_pos;
+    if (left < tail) {
+        env *= (float)left / tail;
+    }
+    if (s.next_waiting) {
+        env *= (float)s.cut_left / CUT_SAMPLES;
+    }
+    return NOTE_AMPLITUDE * env * out;
 }
 
 void synth_render(int16_t *samples, int count)
 {
     for (int i = 0; i < count; i++) {
-        float sample = 0;
+        float sample = 0.0f;
 
-        // Hum: a voice rich in harmonics, and a second one a hair sharp of it.
-        s.hum_gain += ((s.hum_on ? 1.0f : 0.0f) - s.hum_gain) * HUM_FADE;
+        // Tracing hum: warm resonant electrical drone with slow LFO shimmer,
+        // initial activation bloom on touch, and slight downward pitch release on lift.
+        const float rate = s.hum_on ? HUM_FADE_IN : HUM_FADE_OUT;
+        s.hum_gain += ((s.hum_on ? 1.0f : 0.0f) - s.hum_gain) * rate;
         if (s.hum_on || s.hum_gain >= HUM_SILENT) {
-            sample += HUM_AMPLITUDE * s.hum_gain * 0.3f *
-                      (sinf(s.hum_phase) + 0.8f * sinf(2 * s.hum_phase) + 0.5f * sinf(3 * s.hum_phase) +
-                       0.25f * sinf(4 * s.hum_phase) + 0.6f * sinf(s.hum_phase2) + 0.5f * sinf(2 * s.hum_phase2));
-            const float step = TWO_PI * HUM_HZ / SYNTH_SAMPLE_RATE;
+            if (s.hum_on) {
+                if (s.hum_target_pitch < 0.9f) s.hum_target_pitch = 1.0f;
+                s.hum_pitch += (s.hum_target_pitch - s.hum_pitch) * 0.002f;
+            } else if (s.hum_pitch > 0.84f) {
+                s.hum_pitch -= 0.00006f;  // gentle power-down pitch sag when lifting finger
+            }
+            s.hum_bloom *= 0.9992f;       // ~120 ms resonant bloom on touch-begin
+            s.step_pulse *= 0.9975f;      // ~40 ms subtle resonant pulse on each grid node
+            const float lfo = 0.88f + 0.12f * sinf(s.hum_lfo_phase);
+            const float p = s.hum_phase, p2 = s.hum_phase2;
+            const float node_shimmer = s.step_pulse * (s.step_back ? 0.30f * sinf(2.0f * p) : 0.32f * sinf(4.0f * p));
+            const float voice = 0.20f * sinf(p) + 0.55f * sinf(2.0f * p) + 0.38f * sinf(3.0f * p) +
+                                0.20f * sinf(4.0f * p) + 0.35f * sinf(2.0f * p2) + 0.22f * sinf(3.0f * p2) +
+                                0.35f * s.hum_bloom * sinf(3.0f * p) + node_shimmer;
+            sample += HUM_AMPLITUDE * s.hum_gain * lfo * 0.42f * voice;
+
+            const float step = TWO_PI * (HUM_HZ * s.hum_pitch) / SYNTH_SAMPLE_RATE;
             s.hum_phase = wrap(s.hum_phase + step);
             s.hum_phase2 = wrap(s.hum_phase2 + step * HUM_DETUNE);
+            s.hum_lfo_phase = wrap(s.hum_lfo_phase + TWO_PI * HUM_LFO_HZ / SYNTH_SAMPLE_RATE);
         } else {
-            s.hum_gain = 0;
+            s.hum_gain = 0.0f;
         }
 
-        // Phrase: a sine with a little second harmonic and a decaying volume.
-        if (s.note_index < s.note_count) {
-            const note_t *note = &s.notes[s.note_index];
-            const int total = SYNTH_SAMPLE_RATE * note->duration_ms / 1000;
-            const int attack = SYNTH_SAMPLE_RATE * NOTE_ATTACK_MS / 1000;
-            if (s.note_position == 0) {
-                s.note_phase = 0;
-                s.note_envelope = 1.0f;
-            }
-            float gain = s.note_envelope;
-            if (s.note_position < attack) {
-                gain *= (float)s.note_position / attack;
-            }
-            if (s.next_waiting) {
-                gain *= (float)s.cut_left / CUT_SAMPLES;
-            }
-            sample += NOTE_AMPLITUDE * gain * (sinf(s.note_phase) + 0.25f * sinf(2 * s.note_phase));
-            s.note_phase = wrap(s.note_phase + TWO_PI * note->frequency_hz / SYNTH_SAMPLE_RATE);
-            s.note_envelope *= expf(-3.0f / total);  // falls to 5% over the note
-            if (++s.note_position >= total) {
-                s.note_position = 0;
-                s.note_index++;
-            }
+        if (s.phrase_pos < s.phrase_len) {
+            sample += render_phrase_sample();
+            s.phrase_pos++;
         }
-        if (s.next_waiting && (--s.cut_left <= 0 || s.note_index >= s.note_count)) {
+        if (s.next_waiting && (--s.cut_left <= 0 || s.phrase_pos >= s.phrase_len)) {
             start_phrase(s.next);
         }
 
+        if (sample > 32767.0f) sample = 32767.0f;
+        if (sample < -32768.0f) sample = -32768.0f;
         samples[i] = (int16_t)sample;
     }
 }

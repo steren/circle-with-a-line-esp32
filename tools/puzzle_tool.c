@@ -58,7 +58,12 @@ static void print_map(const puzzle_t *p, FILE *out)
                 ch = p->v_edges[row][col] == EDGE_GAP ? ' ' : p->v_edges[row][col] == EDGE_BEACON ? 'o' : '|';
             } else {
                 const puzzle_cell_t *cell = &p->cells[row][col];
-                ch = cell->kind == CELL_COUNT ? '0' + cell->value : cell->kind == CELL_GEM ? 'a' + cell->value : ' ';
+                ch = cell->kind == CELL_COUNT     ? '0' + cell->value
+                     : cell->kind == CELL_GEM     ? 'a' + cell->value
+                     : cell->kind == CELL_STAR    ? 'A' + cell->value
+                     : cell->kind == CELL_POLY    ? 'd' + cell->value
+                     : cell->kind == CELL_NEGATOR ? 'Y'
+                                                  : ' ';
             }
             fputc(ch, out);
         }
@@ -215,6 +220,23 @@ static int self_test(void)
     // Solver: a 2x2 board has 12 paths between opposite corners
     EXPECT(puzzle_parse(&p, "+-+-E\n| | |\n+-+-+\n| | |\nS-+-+"));
     EXPECT(count_solutions(&p, 100, NULL) == 12);
+
+    // Stars: each star needs exactly two symbols of its colour in its area
+    EXPECT(puzzle_parse(&p, "+-+-E\n|A|A|\n+-+-+\n|A|A|\nS-+-+"));
+    EXPECT(walk(&p, &path, "UURR") && !puzzle_check(&p, &path, &result));  // all 4 in one area -> count is 4, not 2
+    EXPECT(walk(&p, &path, "URRU") && puzzle_check(&p, &path, NULL));      // splits top 1x2 (2 A's) from bottom 1x2 (2 A's)
+
+    // Polyominoes: area must match the shape's exact blocks
+    EXPECT(puzzle_parse(&p, "+-+-E\n|e| |\n+-+-+\n| |f|\nS-+-+"));
+    EXPECT(walk(&p, &path, "URRU") && !puzzle_check(&p, &path, &result));  // bottom is 1x2 (e), not 2x1 (f)
+    EXPECT(puzzle_parse(&p, "+-+-E\n|e| |\n+-+-+\n| |e|\nS-+-+"));
+    EXPECT(walk(&p, &path, "URRU") && puzzle_check(&p, &path, NULL));
+
+    // Negators: cancels one broken symbol in its area, fails if nothing is broken
+    EXPECT(puzzle_parse(&p, "+-+-E\n|Y|3|\n+-+-+\n| | |\nS-+-+"));
+    EXPECT(walk(&p, &path, "UURR") && puzzle_check(&p, &path, NULL));      // 3 is broken (has 1 side), Y cancels it
+    EXPECT(puzzle_parse(&p, "+-+-E\n|Y|1|\n+-+-+\n| | |\nS-+-+"));
+    EXPECT(walk(&p, &path, "UURR") && !puzzle_check(&p, &path, &result));  // 1 is already valid, so Y has nothing to cancel
 
     return failures;
 }
@@ -533,11 +555,6 @@ static int cmd_shots(const char *dir)
         printf("next on the last puzzle should do nothing\n");
         failures++;
     }
-    game_reset_line();
-    if (game_is_solved() || s_sounds[GAME_SOUND_RESET] != 1) {
-        printf("reset should clear the line and play its sound\n");
-        failures++;
-    }
 
     printf("%s\n", failures ? "FAILED" : "simulated play ok");
     return failures ? 1 : 0;
@@ -622,8 +639,6 @@ static int cmd_sound(const char *file)
     render(700, &failed);
     failures += report("wrong-answer phrase", &failed, 4000, 20000, 6000);
     synth_phrase(GAME_SOUND_LEVEL);
-    render(300, &buttons);
-    synth_phrase(GAME_SOUND_RESET);
     render(300, &buttons);
     failures += report("button phrases", &buttons, 4000, 20000, 6000);
 

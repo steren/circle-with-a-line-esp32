@@ -13,6 +13,7 @@ void gfx_init(uint16_t *framebuffer, int width, int height);
 void gfx_fill_rect(int x, int y, int w, int h, uint16_t color);
 void gfx_fill_round_rect(int x, int y, int w, int h, int radius, uint16_t color);
 void gfx_fill_circle(int cx, int cy, int radius, uint16_t color);
+void gfx_blend_pixel(int x, int y, uint16_t color, uint8_t alpha);
 
 // Text uses a 5x7 font in a 6x8 cell, scaled up by an integer factor. Only the
 // glyph pixels are drawn; the background is left as it is.

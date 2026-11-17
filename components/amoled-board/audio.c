@@ -88,6 +88,11 @@ esp_err_t audio_init(void)
     return ESP_OK;
 }
 
+void audio_set_power(bool on)
+{
+    gpio_set_level(BOARD_AMP_ENABLE, on ? 1 : 0);
+}
+
 void audio_write(const int16_t *samples, size_t count)
 {
     if (!s_i2s) {

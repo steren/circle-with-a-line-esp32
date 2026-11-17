@@ -127,23 +127,84 @@ void gfx_restore(const uint16_t *layer, int x, int y, int w, int h)
     if (y2 > s_dirty.y2) s_dirty.y2 = y2;
 }
 
+void gfx_blend_pixel(int x, int y, uint16_t color, uint8_t alpha)
+{
+    if (alpha == 0 || x < 0 || y < 0 || x >= s_width || y >= s_height) {
+        return;
+    }
+    if (alpha == 255) {
+        gfx_fill_rect(x, y, 1, 1, color);
+        return;
+    }
+
+    uint32_t fg_r = ((color >> 11) & 0x1F) * 255 / 31;
+    uint32_t fg_g = ((color >> 5) & 0x3F) * 255 / 63;
+    uint32_t fg_b = (color & 0x1F) * 255 / 31;
+    if (s_shade_col) {
+        const uint32_t f = s_shade_col[x] * (uint32_t)s_shade_row[y];
+        const uint32_t d = BAYER[y & 3][x & 3];
+        fg_r = ((fg_r * f) >> 16) + (d >> 1);
+        fg_g = ((fg_g * f) >> 16) + (d >> 2);
+        fg_b = ((fg_b * f) >> 16) + (d >> 1);
+        if (fg_r > 255) fg_r = 255;
+        if (fg_g > 255) fg_g = 255;
+        if (fg_b > 255) fg_b = 255;
+    }
+
+    const uint16_t bg_c = __builtin_bswap16(s_framebuffer[y * s_width + x]);
+    const uint32_t bg_r = ((bg_c >> 11) & 0x1F) * 255 / 31;
+    const uint32_t bg_g = ((bg_c >> 5) & 0x3F) * 255 / 63;
+    const uint32_t bg_b = (bg_c & 0x1F) * 255 / 31;
+
+    const uint32_t inv = 255 - alpha;
+    const uint32_t r = (fg_r * alpha + bg_r * inv + 127) / 255;
+    const uint32_t g = (fg_g * alpha + bg_g * inv + 127) / 255;
+    const uint32_t b = (fg_b * alpha + bg_b * inv + 127) / 255;
+    s_framebuffer[y * s_width + x] = __builtin_bswap16((uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)));
+
+    if (x < s_dirty.x1) s_dirty.x1 = x;
+    if (y < s_dirty.y1) s_dirty.y1 = y;
+    if (x > s_dirty.x2) s_dirty.x2 = x;
+    if (y > s_dirty.y2) s_dirty.y2 = y;
+}
+
 void gfx_fill_round_rect(int x, int y, int w, int h, int radius, uint16_t color)
 {
+    const float r_arc = (float)radius + 0.25f;
     for (int row = 0; row < h; row++) {
-        // Distance from this row's centre to the centre line of the nearest corner arc.
-        float d = 0;
-        if (row < radius) d = radius - row - 0.5f;
-        if (row >= h - radius) d = row - (h - radius) + 0.5f;
-        const int inset = radius - (int)lroundf(sqrtf(radius * radius - d * d));
+        if (row >= radius && row < h - radius) {
+            gfx_fill_rect(x, y + row, w, 1, color);
+            continue;
+        }
+        const float dy = (row < radius) ? ((float)radius - 0.5f - (float)row)
+                                        : ((float)row - (float)(h - radius) + 0.5f);
+        float x_arc = (dy < r_arc) ? sqrtf(r_arc * r_arc - dy * dy) : 0.0f;
+        if (x_arc > (float)radius) x_arc = (float)radius;
+        const int solid_ext = (int)floorf(x_arc);
+        const int inset = radius - solid_ext;
         gfx_fill_rect(x + inset, y + row, w - 2 * inset, 1, color);
+        if (inset > 0) {
+            const uint8_t alpha = (uint8_t)((x_arc - (float)solid_ext) * 255.0f + 0.5f);
+            gfx_blend_pixel(x + inset - 1, y + row, color, alpha);
+            gfx_blend_pixel(x + w - inset, y + row, color, alpha);
+        }
     }
 }
 
 void gfx_fill_circle(int cx, int cy, int radius, uint16_t color)
 {
+    const float r_edge = (float)radius + 0.35f;
     for (int dy = -radius; dy <= radius; dy++) {
-        const int half = (int)sqrtf(radius * radius - dy * dy);
-        gfx_fill_rect(cx - half, cy + dy, 2 * half + 1, 1, color);
+        const float fdy = (float)dy;
+        float x_exact = (fabsf(fdy) < r_edge) ? sqrtf(r_edge * r_edge - fdy * fdy) : 0.0f;
+        if (x_exact > (float)radius) x_exact = (float)radius;
+        const int inner = (int)floorf(x_exact);
+        gfx_fill_rect(cx - inner, cy + dy, 2 * inner + 1, 1, color);
+        if (inner < radius) {
+            const uint8_t alpha = (uint8_t)((x_exact - (float)inner) * 255.0f + 0.5f);
+            gfx_blend_pixel(cx - inner - 1, cy + dy, color, alpha);
+            gfx_blend_pixel(cx + inner + 1, cy + dy, color, alpha);
+        }
     }
 }
 

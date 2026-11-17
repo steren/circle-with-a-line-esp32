@@ -14,7 +14,7 @@
 
 static const char *TAG = "puzzles";
 
-#define MAX_LEVELS 32
+#define MAX_LEVELS 64
 
 static struct {
     SemaphoreHandle_t lock;

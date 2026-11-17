@@ -15,6 +15,9 @@
 void synth_hum_on(void);
 void synth_hum_off(void);
 
+// Modulates the tracing hum as the path grows or backs up across grid nodes.
+void synth_trace_step(int path_length, bool stepped_back);
+
 // Starts the phrase for a game event, cutting off any phrase still playing.
 void synth_phrase(game_sound_t sound);
 

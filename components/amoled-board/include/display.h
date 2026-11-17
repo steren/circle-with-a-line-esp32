@@ -16,4 +16,6 @@ esp_err_t display_init(int column_offset);
 
 void display_set_brightness(uint8_t level);
 
+void display_set_power(bool on);
+
 void display_flush(void);
