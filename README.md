@@ -1,7 +1,9 @@
-# Circle with a Line
+# Circle with a line puzzle ESP32
 
 A line-drawing puzzle game for the **Waveshare ESP32-S3-Touch-AMOLED-1.8** (1.8" 368×448
 AMOLED touch board, no battery), written in plain C on ESP-IDF.
+
+This project is an homage to the panel puzzles of [The Witness](https://store.steampowered.com/app/210970/The_Witness/), one of the best games of all time. All code and assets — procedural puzzle generation, vector graphics, and synthesized audio — have been created from scratch.
 
 > **Board revision:** the unit on this desk is the **V2** hardware (CO5300 display driver,
 > CST820 touch), even though it was sold as SH8601 + FT3168. Waveshare switched shipments
@@ -21,7 +23,7 @@ output goes to `build/` (firmware) and `build-host/` (PC tool, screenshots, soun
 
 ## The game
 
-An original puzzle game for the touch screen. Each puzzle glows in one flat, saturated
+Each puzzle glows in one flat, saturated
 colour, like a backlit acrylic or electroluminescent panel, softly darkening towards the
 edges of the screen. The board is a grid of tiles separated by deep channels of the same
 hue. Drag a line along the channels from the start (a large solid circle)
