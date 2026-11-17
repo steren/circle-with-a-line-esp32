@@ -51,7 +51,8 @@ puzzle; a wrong one flashes red and marks the clues it broke.
 | --- | --- |
 | BOOT, short press | next puzzle |
 | PWR, short press | previous puzzle |
-| either, held for 6 s | power off / on |
+| either, held for 3 s | power off |
+| either, held for 1 s (while off) | power on |
 
 Sound comes from the board's speaker. While your finger is drawing, a steady hum plays,
 and it fades out when you lift your finger. Solving, a wrong answer and the buttons each have a short

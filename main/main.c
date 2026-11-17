@@ -3,7 +3,8 @@
 //
 // Buttons:  BOOT, short press        next puzzle
 //           PWR, short press         previous puzzle
-//           either, held for 6 s     power off / on
+//           either, held for 3 s     power off
+//           either, held for 1 s     power on (while off)
 
 #include "audio.h"
 #include "board.h"
@@ -23,7 +24,8 @@
 static const char *TAG = "circle";
 
 #define CO5300_COLUMN_OFFSET 16  // the V2 panel starts 16 columns into the controller's memory
-#define LONG_PRESS_MS 6000       // holding either button for 6 s switches the board off or on
+#define POWER_OFF_MS 3000        // holding either button for 3 s switches the board off
+#define POWER_ON_MS 1000         // holding either button for 1 s switches the board back on
 #define BRIGHTNESS_ACTIVE 200
 #define BRIGHTNESS_DIM 25
 #define FADE_IN_MS 800           // how long a new puzzle takes to fade in from black
@@ -43,8 +45,8 @@ typedef struct {
 } button_state_t;
 
 // Reports a short press when the button is released, or a long press as soon
-// as it has been held for LONG_PRESS_MS.
-static press_t poll_button(button_state_t *b, uint32_t now_ms)
+// as it has been held for hold_ms.
+static press_t poll_button(button_state_t *b, uint32_t now_ms, uint32_t hold_ms)
 {
     const bool read = board_button_pressed(b->button);
     const bool stable = (read == b->last_read);  // two equal readings in a row
@@ -60,7 +62,7 @@ static press_t poll_button(button_state_t *b, uint32_t now_ms)
     } else if (!read && b->down) {
         b->down = false;
         return b->long_sent ? PRESS_NONE : PRESS_SHORT;
-    } else if (b->down && !b->long_sent && now_ms - b->down_since_ms >= LONG_PRESS_MS) {
+    } else if (b->down && !b->long_sent && now_ms - b->down_since_ms >= hold_ms) {
         b->long_sent = true;
         return PRESS_LONG;
     }
@@ -135,11 +137,13 @@ void app_main(void)
     while (true) {
         const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
 
-        const press_t boot_press = poll_button(&boot, now_ms), pwr_press = poll_button(&pwr, now_ms);
+        const uint32_t hold_ms = powered_off ? POWER_ON_MS : POWER_OFF_MS;
+        const press_t boot_press = poll_button(&boot, now_ms, hold_ms),
+                      pwr_press = poll_button(&pwr, now_ms, hold_ms);
         if (boot_press == PRESS_LONG || pwr_press == PRESS_LONG) {
             powered_off = !powered_off;
-            ESP_LOGI(TAG, "%s held for 6 s: power %s", boot_press == PRESS_LONG ? "BOOT" : "PWR",
-                     powered_off ? "off" : "on");
+            ESP_LOGI(TAG, "%s held for %lu s: power %s", boot_press == PRESS_LONG ? "BOOT" : "PWR",
+                     (unsigned long)(hold_ms / 1000), powered_off ? "off" : "on");
             if (powered_off) {
                 sound_play(GAME_SOUND_LIFT);
                 audio_set_power(false);
